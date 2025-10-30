@@ -63,6 +63,7 @@ def record_distribution(penguin_name: str, food: int, has_tool: bool) -> str:
         DISTRIBUTION_HISTORY[penguin_name] = []
     DISTRIBUTION_HISTORY[penguin_name].append({"food": food, "has_tool": has_tool})
     return f"Recorded: {penguin_name} got {food} food and {'a' if has_tool else 'no'} tool"
+
 class ScientistAgent(ToolCallingAgent):
     def __init__(self, initial_food_supply: int = 20, refresh_interval: int = 5) -> None:
         super().__init__(

@@ -79,7 +79,7 @@ class ScientistAgent(ToolCallingAgent):
 
         print(f"\n--- Turn {self.turn_counter}: Scientist Responds to {penguin.name} ---")
         print(f"Penguin Action: {penguin_action}")
-3        print(f"Penguin State:")
+        print(f"Penguin State:")
         print(f"  - Food: {penguin.food}")
         print(f"  - Has Tool: {penguin.has_tool}")
 
