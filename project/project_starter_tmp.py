@@ -1,5 +1,3 @@
-import copy
-
 import pandas as pd
 import numpy as np
 import os
@@ -8,15 +6,11 @@ import dotenv
 import ast
 import smolagents as smol
 # Correct imports: Agent is needed for the orchestrator
-from smolagents import OpenAIServerModel, tool
+from smolagents import OpenAIServerModel, tool, Agent
 from pydantic import BaseModel, Field  # Import Pydantic
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
 from typing import Dict, List, Union, Optional
-from sqlalchemy import create_engine, Engine
-from dataclasses import dataclass, field, asdict
-
-SEMANTIC_SEARCH_ENABLED = True
 
 # --- Semantic Search Imports ---
 # Attempt to import necessary libraries for semantic search.
@@ -26,6 +20,7 @@ try:
     from sklearn.metrics.pairwise import cosine_similarity
     # Check if openai library is available
     import openai
+
     SEMANTIC_SEARCH_ENABLED = True
     print("OpenAI and scikit-learn libraries found. Enabling semantic search.")
 except ImportError:
@@ -385,18 +380,10 @@ def get_item_details(item_name: str) -> pd.DataFrame:
 # Set up and load your env parameters and instantiate your model.
 dotenv.load_dotenv()
 api_key = os.getenv("UDACITY_OPENAI_API_KEY")
+api_base = os.getenv("UDACITY_OPENAI_API_BASE", "https://openai.vocareum.com/v1")  # Default if not set
 
 if not api_key:
     raise ValueError("UDACITY_OPENAI_API_KEY not found in .env file")
-
-api_base = os.getenv("UDACITY_OPENAI_API_BASE", "https://openai.vocareum.com/v1") # Default if not set
-
-# Configure the model explicitly
-model = OpenAIServerModel(
-    model_id="gpt-4o-mini",  # Use a modern, capable model
-    api_key=api_key,
-    api_base="https://openai.vocareum.com/v1",
-)
 
 # --- OpenAI Client Setup (for embeddings) ---
 openai_client = None
@@ -409,16 +396,23 @@ if SEMANTIC_SEARCH_ENABLED:
         SEMANTIC_SEARCH_ENABLED = False
 # --- End OpenAI Client Setup ---
 
+# Configure the agent model explicitly
+model = OpenAIServerModel(
+    model_id="gpt-4o-mini",  # Use a modern, capable model
+    api_key=api_key,
+    api_base=api_base,
+)
+
 # --- Precompute Embeddings ---
-item_embedding_map = {} # {item_name: numpy_embedding_vector}
+item_embedding_map = {}  # {item_name: numpy_embedding_vector}
+
 
 def precompute_openai_embeddings(client, items_list):
     """Calculates and stores embeddings for item names using OpenAI API."""
-    global item_embedding_map # Ensure we modify the global map
-    global SEMANTIC_SEARCH_ENABLED
+    global item_embedding_map  # Ensure we modify the global map
     if not client or not SEMANTIC_SEARCH_ENABLED:
         print("Skipping embedding precomputation (disabled or client failed).")
-        return {} # Return empty map
+        return {}  # Return empty map
 
     item_names = [item['item_name'] for item in items_list]
     if not item_names:
@@ -430,32 +424,35 @@ def precompute_openai_embeddings(client, items_list):
         # Use a recommended embedding model (check OpenAI docs for latest)
         response = client.embeddings.create(
             input=item_names,
-            model="text-embedding-3-small" # Or another suitable model like text-embedding-ada-002
+            model="text-embedding-3-small"  # Or another suitable model like text-embedding-ada-002
         )
 
         # Check if response structure is as expected
         if response.data and len(response.data) == len(item_names):
-             item_embeddings_raw = [item.embedding for item in response.data]
-             # Store as numpy arrays for easier similarity calculation
-             temp_map = {name: np.array(emb) for name, emb in zip(item_names, item_embeddings_raw)}
-             print(f"Successfully precomputed embeddings for {len(temp_map)} items.")
-             return temp_map
+            item_embeddings_raw = [item.embedding for item in response.data]
+            # Store as numpy arrays for easier similarity calculation
+            temp_map = {name: np.array(emb) for name, emb in zip(item_names, item_embeddings_raw)}
+            print(f"Successfully precomputed embeddings for {len(temp_map)} items.")
+            return temp_map
         else:
-             print("ERROR: Unexpected response structure from OpenAI embeddings API.")
-             print(f"Response: {response}") # Log the response for debugging
-             raise ValueError("Embeddings data not found or mismatch in count.")
+            print("ERROR: Unexpected response structure from OpenAI embeddings API.")
+            print(f"Response: {response}")  # Log the response for debugging
+            raise ValueError("Embeddings data not found or mismatch in count.")
 
     except Exception as e:
         print(f"ERROR during OpenAI embedding precomputation: {e}")
         print("Disabling semantic search due to precomputation failure.")
-        #global SEMANTIC_SEARCH_ENABLED # Need to modify global flag
+        global SEMANTIC_SEARCH_ENABLED  # Need to modify global flag
         SEMANTIC_SEARCH_ENABLED = False
-        return {} # Return empty map on failure
+        return {}  # Return empty map on failure
 
 
 # --- Call precomputation function once at startup ---
 item_embedding_map = precompute_openai_embeddings(openai_client, paper_supplies)
+
+
 # --- End Precomputation ---
+
 
 # --- Pydantic Models for Structured I/O ---
 
@@ -506,48 +503,48 @@ class InventoryStockReport(BaseModel):
     stock_levels: Dict[str, int]
 
 
-class InventoryValidationReport(BaseModel):
+class ValidationSuccess(BaseModel):
     status: str = "VALIDATION_SUCCESS"
     item_name: str
     requested_quantity: int
     unit_price: float
-    inventory_item_summary : InventoryItemSummary
     delivery_note: str
     restock_note: str
 
 
-class InventoryValidationFailure(BaseModel):
+class ValidationFailure(BaseModel):
     status: str = "VALIDATION_FAILED"
-    item_name: str
+    item_name: str  # The original query term if mapping failed, else the mapped name
     reason: str
 
 
-InventoryValidationResult = Union[InventoryValidationReport, InventoryValidationFailure]
+ValidationResult = Union[ValidationSuccess, ValidationFailure]
 
-class AggregatedInventoryValidationReport(BaseModel):
-    inventory_item_reports: List[Union[InventoryValidationReport, InventoryValidationFailure]]
 
+# --- NEW: Pydantic model for the list of items ---
 class ItemRequest(BaseModel):
     item_query_term: str = Field(..., description="The user's description of the item (e.g., 'copy paper')")
     requested_quantity: int = Field(..., description="The number of units requested")
 
-@dataclass
-class OrderFactoryState:
-    iventoryValidationReports : List[AggregatedInventoryValidationReport] = None
 
-orderFactoryState = OrderFactoryState(iventoryValidationReports=[])
+# --- MODIFIED: Aggregated report model ---
+class AggregatedInventoryValidationReport(BaseModel):
+    # This model will now hold all results, success or failure
+    inventory_item_reports: List[ValidationResult] = Field(...,
+                                                           description="A list of validation results, one for each item.")
+
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
 
-# --- Deterministic Mapping for Item Names ---
+# --- Deterministic Mapping for Item Names (Fallback) ---
 ITEM_ALIAS_MAP = {
     "a4 paper": "A4 paper",
     "letter paper": "Letter-sized paper",
     "letter-size paper": "Letter-sized paper",
     "card stock": "Cardstock",
     "colored paper": "Colored paper",
-    "colourful cardstock": "Colored paper",
+    "colourful cardstock": "Colored paper",  # Added alias
     "bright-colored paper": "Bright-colored paper",
     "copy paper": "Standard copy paper",
     "standard printer paper": "Standard copy paper",
@@ -564,16 +561,13 @@ ITEM_ALIAS_MAP = {
 # --- Tool for Quoting Agent ---
 
 @tool
-def toolSearchQuoteHistory(search_terms: List[str]) -> QuoteHistoryResponse:
+def tool_search_quote_history(search_terms: List[str]) -> QuoteHistoryResponse:
     """
-    Searches historical orders based on the search terms provided.
-    Search is performed based on the search terms applied on the following quote fields:
-            1.quote_explanation.
-            2.quote_response.
+    Searches historical quotes for similar requests to inform new pricing.
 
     Args:
-        search_terms (List[str]): A list of keywords extracted from the customer's request to
-                                  (e.g., item names, event types, requested quantities, etc.).
+        search_terms (List[str]): A list of keywords from the customer's request
+                                  (e.g., item names, event type).
 
     Returns:
         QuoteHistoryResponse: A Pydantic model containing a list of matches and a count.
@@ -582,14 +576,16 @@ def toolSearchQuoteHistory(search_terms: List[str]) -> QuoteHistoryResponse:
         results = search_quote_history(search_terms, limit=3)
         return QuoteHistoryResponse(matches_found=len(results), matches=results)
     except Exception as e:
+        # Log the error for debugging
+        print(f"ERROR in tool_search_quote_history: {e}")
         return QuoteHistoryResponse(matches_found=0, matches=[])
 
 
 # --- Tool for Order Processor Agent ---
 
 @tool
-def toolCreateSaleTransaction(item_name: str, quantity: int, total_price: float,
-                              as_of_date: str) -> TransactionConfirmation:
+def tool_create_sale_transaction(item_name: str, quantity: int, total_price: float,
+                                 as_of_date: str) -> TransactionConfirmation:
     """
     Finalizes a sale and records it in the database. This *reduces* stock.
     This is ONLY called after validation is complete.
@@ -616,6 +612,8 @@ def toolCreateSaleTransaction(item_name: str, quantity: int, total_price: float,
             total_price=total_price
         )
     except Exception as e:
+        # Log the error for debugging
+        print(f"ERROR in tool_create_sale_transaction for {item_name}: {e}")
         return TransactionConfirmation(
             transaction_id=-1,
             item_name=item_name,
@@ -627,7 +625,7 @@ def toolCreateSaleTransaction(item_name: str, quantity: int, total_price: float,
 
 # --- Semantic Search Tool ---
 @tool
-def toolFindClosestItem(query_term: str) -> str:
+def tool_find_closest_item(query_term: str) -> str:
     """
     Finds the item_name from the paper_supplies list that is semantically
     closest to the user's query_term using OpenAI embedding similarity.
@@ -641,16 +639,17 @@ def toolFindClosestItem(query_term: str) -> str:
         str: The best matching exact item_name from the paper_supplies list,
              or an error message starting with "ERROR:" if no good match is found.
     """
+
     # --- Fallback Logic ---
     def fallback_search(term):
         mapped_name = ITEM_ALIAS_MAP.get(term.lower())
         if mapped_name:
-             print(f"Semantic Search Disabled/Failed: Using alias map for '{term}' -> '{mapped_name}'")
-             return mapped_name
+            print(f"Semantic Search Disabled/Failed: Using alias map for '{term}' -> '{mapped_name}'")
+            return mapped_name
         else:
-             print(f"Semantic Search Disabled/Failed: No alias found for '{term}', returning original.")
-             # Return original term - validation tool will likely fail, which is correct.
-             return term
+            print(f"Semantic Search Disabled/Failed: No alias found for '{term}', returning original.")
+            # Return original term - validation tool will likely fail, which is correct.
+            return term
 
     if not SEMANTIC_SEARCH_ENABLED or not item_embedding_map or not openai_client:
         return fallback_search(query_term)
@@ -663,7 +662,7 @@ def toolFindClosestItem(query_term: str) -> str:
         # 1. Get embedding for the query term
         response = openai_client.embeddings.create(
             input=[query_term],
-             model="text-embedding-3-small" # Use the same model as precomputation
+            model="text-embedding-3-small"  # Use the same model as precomputation
         )
         if not response.data:
             raise ValueError("No embedding data returned from OpenAI API.")
@@ -685,23 +684,26 @@ def toolFindClosestItem(query_term: str) -> str:
         best_score = similarities[best_match_index]
 
         # 5. Apply threshold
-        threshold = 0.7 # Adjust this threshold based on testing
+        threshold = 0.7  # Adjust this threshold based on testing
         best_matching_item_name = precomputed_names[best_match_index]
 
         if best_score < threshold:
-             # If score is low, try the alias map as a secondary check
-             alias_match = ITEM_ALIAS_MAP.get(query_term.lower())
-             if alias_match and alias_match == best_matching_item_name:
-                 print(f"Semantic Search: Low score {best_score:.2f} for '{query_term}' -> '{best_matching_item_name}', but confirmed by alias map.")
-                 return best_matching_item_name
-             elif alias_match:
-                 print(f"Semantic Search: Low score {best_score:.2f} for '{query_term}'. Falling back to alias map -> '{alias_match}'.")
-                 return alias_match
-             else:
-                  # Return the low-scoring match anyway, let validation decide? Or return error?
-                  # Let's return error for now if alias doesn't match either.
-                 print(f"Semantic Search: Score {best_score:.2f} < {threshold} for '{query_term}'. No alias match. Failing.")
-                 return f"ERROR: Could not find a close match for '{query_term}'. Best score {best_score:.2f} is below threshold {threshold}."
+            # If score is low, try the alias map as a secondary check
+            alias_match = ITEM_ALIAS_MAP.get(query_term.lower())
+            if alias_match and alias_match == best_matching_item_name:
+                print(
+                    f"Semantic Search: Low score {best_score:.2f} for '{query_term}' -> '{best_matching_item_name}', but confirmed by alias map.")
+                return best_matching_item_name
+            elif alias_match:
+                print(
+                    f"Semantic Search: Low score {best_score:.2f} for '{query_term}'. Falling back to alias map -> '{alias_match}'.")
+                return alias_match
+            else:
+                # Return the low-scoring match anyway, let validation decide? Or return error?
+                # Let's return error for now if alias doesn't match either.
+                print(
+                    f"Semantic Search: Score {best_score:.2f} < {threshold} for '{query_term}'. No alias match. Failing.")
+                return f"ERROR: Could not find a close match for '{query_term}'. Best score {best_score:.2f} is below threshold {threshold}."
         else:
             print(f"Semantic Search: '{query_term}' -> '{best_matching_item_name}' (Score: {best_score:.2f})")
             return best_matching_item_name
@@ -711,40 +713,15 @@ def toolFindClosestItem(query_term: str) -> str:
         # Fallback to alias map on error
         return fallback_search(query_term)
 
-# --- NEW DETERMINISTIC "SUPER-TOOL" FOR VALIDATION ---
 
+# --- Deterministic "Super-Tool" for Validation ---
+# --- This tool is now called by the new toolGenerateInventoryReport ---
 @tool
-def toolApplyDiscount(discount_percent: float) -> AggregatedInventoryValidationReport:
-    """
-    Applies a percentage discount to the unit_price of all successful items
-    in the latest inventory validation report stored in the system's memory.
-
-    Args:
-        discount_percent (float): The discount percentage to apply (e.g., 5 for 5%, 10.5 for 10.5%).
-
-    Returns:
-        AggregatedInventoryValidationReport: A new report model with the
-                                             discounted unit prices.
-    """
-    if not orderFactoryState.iventoryValidationReports:
-        # This case should not happen in the normal flow
-        raise ValueError("No inventory report found in state.")
-
-    # Create a deep copy to avoid mutating the original report in state
-    original_report = orderFactoryState.iventoryValidationReports[-1]
-    discounted_report = copy.deepcopy(original_report)
-
-    discount_multiplier = 1.0 - (discount_percent / 100.0)
-
-    for item_report in discounted_report.inventory_item_reports:
-        if isinstance(item_report, InventoryValidationReport):
-            # Apply discount to the unit price
-            item_report.unit_price = item_report.unit_price * discount_multiplier
-
-    return discounted_report
-
-@tool
-def validateInventoryItemTool(item_query_term: str, requested_quantity: int, as_of_date: str) -> InventoryValidationResult:
+def validateInventoryItemTool(  # Renamed from tool_validate_item_and_handle_stock
+        item_query_term: str,  # Changed input from exact_item_name
+        requested_quantity: int,
+        as_of_date: str
+) -> ValidationResult:
     """
     Processes a single item from an order request.
     1. Finds the exact item name using semantic search (tool_find_closest_item).
@@ -758,23 +735,24 @@ def validateInventoryItemTool(item_query_term: str, requested_quantity: int, as_
         as_of_date (str): The date of the request (ISO format YYYY-MM-DD).
 
     Returns:
-        ValidationResult: A Pydantic model (`InventoryValidationReport` or `InventoryValidationFailure`).
+        ValidationResult: A Pydantic model (`ValidationSuccess` or `ValidationFailure`).
     """
     # --- Step 1: Find Exact Item Name ---
-    total_cost = 0
-    exact_item_name = toolFindClosestItem(item_query_term)
+    exact_item_name = tool_find_closest_item(item_query_term)
     if exact_item_name.startswith("ERROR:"):
         # If semantic search failed, return a ValidationFailure immediately
-        return InventoryValidationFailure(item_name=item_query_term, reason=exact_item_name) # Pass the error message as the reason
+        return ValidationFailure(item_name=item_query_term,
+                                 reason=exact_item_name)  # Pass the error message as the reason
 
     # If successful, proceed with the exact name
-    error_item_name = item_query_term # Keep original term for error reporting
+    error_item_name = item_query_term  # Keep original term for error reporting
 
     try:
         # --- Step 2: Get Item Details ---
         details_df = get_item_details(exact_item_name)
         if details_df.empty:
-            return InventoryValidationFailure(item_name=error_item_name, reason=f"Item '{exact_item_name}' (matched from '{item_query_term}') not found in inventory details.")
+            return ValidationFailure(item_name=error_item_name,
+                                     reason=f"Item '{exact_item_name}' (matched from '{item_query_term}') not found in inventory details.")
 
         details = details_df.iloc[0]
         unit_price = details["unit_price"]
@@ -789,10 +767,11 @@ def validateInventoryItemTool(item_query_term: str, requested_quantity: int, as_
         # --- Step 4: Handle Out-of-Stock for this Order ---
         if stock < requested_quantity:
             supplier_status = get_supplier_delivery_date(as_of_date, requested_quantity)
-            days_to_deliver = (datetime.fromisoformat(supplier_status) - datetime.fromisoformat(as_of_date.split("T")[0])).days
+            days_to_deliver = (
+                        datetime.fromisoformat(supplier_status) - datetime.fromisoformat(as_of_date.split("T")[0])).days
 
             if days_to_deliver > 7:
-                return InventoryValidationFailure(
+                return ValidationFailure(
                     item_name=error_item_name,
                     reason=f"Item '{exact_item_name}' is out of stock ({stock} available) and supplier delivery is too late ({supplier_status})."
                 )
@@ -818,27 +797,24 @@ def validateInventoryItemTool(item_query_term: str, requested_quantity: int, as_
                 restock_note = f"Stock is low ({stock}/{min_stock}) but restock failed due to insufficient cash (${cash:.2f} < ${total_cost:.2f})."
 
         # --- Final Report ---
-        return InventoryValidationReport(
-            item_name = exact_item_name, # Return the exact name found
-            requested_quantity = requested_quantity,
-            unit_price = unit_price,
-            delivery_note = delivery_note,
-            restock_note = restock_note,
-            inventory_item_summary=InventoryItemSummary(
-                                        item_name = exact_item_name,
-                                        stock = stock,
-                                        unit_price = unit_price,
-                                        value = total_cost
-                                    )
-            )
+        return ValidationSuccess(
+            item_name=exact_item_name,  # Return the exact name found
+            requested_quantity=requested_quantity,
+            unit_price=unit_price,
+            delivery_note=delivery_note,
+            restock_note=restock_note
+        )
 
     except Exception as e:
-         # Log the error for debugging
-        print(f"ERROR in tool_validate_item_and_handle_stock for {exact_item_name} (queried as '{item_query_term}'): {e}")
+        # Log the error for debugging
+        print(f"ERROR in validateInventoryItemTool for {exact_item_name} (queried as '{item_query_term}'): {e}")
         import traceback
-        traceback.print_exc() # Print full traceback for debugging
-        return InventoryValidationFailure(item_name=error_item_name, reason=f"Internal error during validation for '{exact_item_name}': {e}")
+        traceback.print_exc()  # Print full traceback for debugging
+        return ValidationFailure(item_name=error_item_name,
+                                 reason=f"Internal error during validation for '{exact_item_name}': {e}")
 
+
+# --- NEW: Aggregating Tool ---
 @tool
 def toolGenerateInventoryReport(
         item_requests: List[ItemRequest],
@@ -861,25 +837,22 @@ def toolGenerateInventoryReport(
     all_reports = []
     print(f"--- Generating Inventory Report for {len(item_requests)} items on {as_of_date} ---")
     for item_req in item_requests:
-        print(f"Validating item: {item_req['item_query_term']} (Qty: {item_req['requested_quantity']}")
+        print(f"Validating item: {item_req.item_query_term} (Qty: {item_req.requested_quantity})")
         # Call the original validation tool for each item
         result = validateInventoryItemTool(
-            item_query_term=item_req['item_query_term'],
-            requested_quantity=item_req['requested_quantity'],
+            item_query_term=item_req.item_query_term,
+            requested_quantity=item_req.requested_quantity,
             as_of_date=as_of_date
         )
         all_reports.append(result)
 
     print(f"--- Aggregated Report Generation Complete. {len(all_reports)} results. ---")
-
-    aggregatedInvetoryReport = AggregatedInventoryValidationReport(inventory_item_reports=all_reports)
-    orderFactoryState.iventoryValidationReports.append(aggregatedInvetoryReport)
-
     return AggregatedInventoryValidationReport(inventory_item_reports=all_reports)
+
 
 # --- Tools for Orchestrator Agent ---
 @tool
-def toolGenerateFinancialReport(as_of_date: str) -> FinancialReport:
+def tool_generate_financial_report(as_of_date: str) -> FinancialReport:
     """
     Generates a full financial report as a structured Pydantic model.
 
@@ -889,19 +862,27 @@ def toolGenerateFinancialReport(as_of_date: str) -> FinancialReport:
     Returns:
         FinancialReport: A Pydantic model containing the full report.
     """
-    report = generate_financial_report(as_of_date)
-    return FinancialReport(
-        as_of_date=report["as_of_date"],
-        cash_balance=report["cash_balance"],
-        inventory_value=report["inventory_value"],
-        total_assets=report["total_assets"],
-        inventory_summary=[InventoryItemSummary(**item) for item in report["inventory_summary"]],
-        top_selling_products=[TopSeller(**item) for item in report["top_selling_products"]]
-    )
+    try:
+        report = generate_financial_report(as_of_date)
+        return FinancialReport(
+            as_of_date=report["as_of_date"],
+            cash_balance=report["cash_balance"],
+            inventory_value=report["inventory_value"],
+            total_assets=report["total_assets"],
+            inventory_summary=[InventoryItemSummary(**item) for item in report["inventory_summary"]],
+            top_selling_products=[TopSeller(**item) for item in report["top_selling_products"]]
+        )
+    except Exception as e:
+        # Log the error for debugging
+        print(f"ERROR in tool_generate_financial_report: {e}")
+        # Return a model indicating failure (or raise an exception)
+        # For simplicity, returning a basic model; adjust as needed
+        return FinancialReport(as_of_date=as_of_date, cash_balance=0, inventory_value=0, total_assets=0,
+                               inventory_summary=[], top_selling_products=[])
 
 
 @tool
-def toolGetFullInventory(as_of_date: str) -> InventoryStockReport:
+def tool_get_full_inventory(as_of_date: str) -> InventoryStockReport:
     """
     Retrieves a list of *all* available items and their stock levels.
 
@@ -911,15 +892,20 @@ def toolGetFullInventory(as_of_date: str) -> InventoryStockReport:
     Returns:
         InventoryStockReport: A Pydantic model containing a dictionary of stock levels.
     """
-    inventory_dict = get_all_inventory(as_of_date)
-    return InventoryStockReport(as_of_date=as_of_date, stock_levels=inventory_dict)
+    try:
+        inventory_dict = get_all_inventory(as_of_date)
+        return InventoryStockReport(as_of_date=as_of_date, stock_levels=inventory_dict)
+    except Exception as e:
+        # Log the error for debugging
+        print(f"ERROR in tool_get_full_inventory: {e}")
+        return InventoryStockReport(as_of_date=as_of_date, stock_levels={})
 
 
 # Set up your agents and create an orchestration agent that will manage them.
 
 # --- Worker Agents ---
 
-# Agent 2: (Handles Step 1 - Inventory Validation)
+# Agent 1: (Handles Step 1 - Validation)
 inventoryValidatorAgent = smol.ToolCallingAgent(  # Renamed from inventory_validator
     name="inventory_validator",
     description=(
@@ -931,8 +917,9 @@ inventoryValidatorAgent = smol.ToolCallingAgent(  # Renamed from inventory_valid
         "2.  **Create ItemRequest List:** Format these into a list of `ItemRequest` objects. For example: "
         "    `[ItemRequest(item_query_term='copy paper', requested_quantity=500), ItemRequest(item_query_term='envelopes', requested_quantity=100)]` "
         "3.  **Call Report Tool:** Call the `toolGenerateInventoryReport` tool *once*. Pass the list of `ItemRequest` objects and the `as_of_date`. "
-        "4.  *Return Report:** The tool will return an `AggregatedInventoryValidationReport` model. Return ONLY THIS REPORT. "
-
+        "4.  **Analyze Report:** The tool will return an `AggregatedInventoryValidationReport` model. This is your only job. "
+        "5.  **Return Full Report:** Respond with the *full, unmodified string representation* of the `AggregatedInventoryValidationReport` model you received. Do not add any conversational text. "
+        "    Example response: `inventory_item_reports=[ValidationSuccess(status='VALIDATION_SUCCESS', ...), ValidationFailure(status='VALIDATION_FAILED', ...)]` "
     ),
     tools=[
         toolGenerateInventoryReport,  # <-- NEW, single tool
@@ -941,181 +928,124 @@ inventoryValidatorAgent = smol.ToolCallingAgent(  # Renamed from inventory_valid
 )
 
 # Agent 2: (Handles Step 2 - Quoting)
-quotingSpecialistAgent = smol.ToolCallingAgent(
+quoting_specialist = smol.ToolCallingAgent(
     name="quoting_specialist",
-    description= """ 
-        You are an expert Quoting Specialist. Your job is to:"
-        1. Search for similar orders to the original request to determine discount based on order history between 0 and 5%. 
-           You must do that with the tool 'toolSearchQuoteHistory'. 
-        2. Determine additional discount based on order value.
-        3. Apply cummulative discount to the order with tool 'toolApplyDiscount'. 
-        4. Quote the order with tool 'toolCreateQuote'. 
-        
-        You will receive an `AggregatedInventoryValidationReport` string from the General Manager. 
-        
+    description=(  # Correct argument for ToolCallingAgent
+        "You are an expert quoting specialist. Your job is to *only* do math and formatting. "
+        "You will receive an `AggregatedInventoryValidationReport` string from the General Manager. "
+        "This string contains a list of `ValidationSuccess` and/or `ValidationFailure` models. "
+        "You MUST NOT call any inventory tools. "
+
         "**Your Workflow:** "
-        1.  **Check Oder Feasibility: ** If NOT respond with 'QUOTE FAILED:' followed by the reasons"
-        2.  **Determine Discount based on similar Order History***: Value based on Aggregate Inventory Report**"
-             - Define Search Criteria:** Create a list of useful search criterias based on the original order content and inventory report."
-             - call tool 'toolSearchQuoteHistory' with the list of search criteria. 
-        3. Determine Discount:** Based on the initial order value:
-            - If `initial_total < 100`: `discount_percent = 0` "
-            - If `100 <= initial_total < 500`: `discount_percent = 5` "
-            - If `500 <= initial_total < 1000`: `discount_percent = 10` "
-            - If `initial_total >= 1000`: `discount_percent = 15` "
-            - (You may review the `QuoteHistoryResponse` for context, but stick to the price-based discount tiers.) "
-        4. **Apply Total Discount from point 3 and 4** Call the `toolApplyDiscount(discount_percent=...)` tool ONLY ONCE for entire order."
-        5. **Summarize Quote details for customer order**
-    """
-    ,
+        "1.  **Parse Report:** Parse the string to find all models in the `inventory_item_reports` list. "
+        "2.  **Check for Failures:** If *any* model in the list is a `ValidationFailure`, the entire quote fails. "
+        "    - Respond with 'QUOTE FAILED:' followed by the `reason` from the first `ValidationFailure` model. "
+        "3.  **Calculate Price:** If all models are `ValidationSuccess`: "
+        "    - Extract `item_name`, `requested_quantity`, `unit_price`, `delivery_note`, and `restock_note` from each `ValidationSuccess` model. "
+        "    - Calculate `Total = sum(requested_quantity * unit_price)` for all items. "
+        "4.  **Apply Discounts:** Apply 5% discount if Total > $500. Apply 10% discount if Total > $1000. "
+        "5.  **Search History:** Call `tool_search_quote_history` with the `item_name`s. This returns a `QuoteHistoryResponse` model. "
+        "6.  **Format Quote:** Respond with 'QUOTE READY:'. Include the itemized list, final total, discount, all 'notes', and history summary. "
+        "    Example: 'QUOTE READY: "
+        "    - A4 paper (500 units): $25.00 "
+        "    - Envelopes (100 units): $5.00 "
+        "    Total: $30.00 (No discount applied). "
+        "    Notes: Restock order for A4 paper placed. Envelopes are in stock. "
+        "    History: Found 2 similar quotes. "
+        "    '"
+    ),
     tools=[
-        toolSearchQuoteHistory,
-        toolApplyDiscount
+        tool_search_quote_history,  # Only tool needed
     ],
     model=model
 )
 
 # Agent 3: (Handles Step 3 - Recording)
-orderProcessorAgent = smol.ToolCallingAgent(
+order_processor = smol.ToolCallingAgent(
     name="order_processor",
     description=(  # Correct argument for ToolCallingAgent
         "You are a meticulous database recorder. Your ONLY job is to record transactions for a sale that is already confirmed. "
         "You will receive the final, approved quote details (item list, quantities, prices, and 'as_of_date'). "
-        "1.  **Process Sales (Loop):** For *each item*, call `tool_create_sale_transaction`. "
+        "1.  **Parse Quote:** Extract each item's `item_name`, `quantity`, and `unit_price` from the quote details. "
+        "2.  **Process Sales (Loop):** For *each item*, calculate its `total_price = quantity * unit_price`. "
+        "    Then, call `tool_create_sale_transaction` with the `item_name`, `quantity`, `total_price`, and `as_of_date`. "
         "    This tool will return a `TransactionConfirmation` model. "
-        "2.  **Final Report:** After processing all items, provide a single summary message: "
-        "    'SALE CONFIRMED: All transactions recorded.' and include the details from the `TransactionConfirmation` models."
+        "3.  **Final Report:** After processing all items, provide a single summary message: "
+        "    'SALE CONFIRMED: All transactions recorded.' and include the details (e.g., `transaction_id`, `item_name`) from the `TransactionConfirmation` models."
     ),
     tools=[
-        toolCreateSaleTransaction,  # Only tool needed
+        tool_create_sale_transaction,  # Only tool needed
     ],
     model=model
 )
 
 # --- Orchestrator Agent ---
-@tool
-def delegateToInventoryValidator(request: str,  as_of_date : str) -> AggregatedInventoryValidationReport:
-    """
-    Delegate validation tasks to the inventory validator agent.
-
-    Args:
-        request: The full original request.
-        as_of_date: The date of the request at which the order must be fulfilled.
-
-    Returns:
-        Validation result message starting with either 'VALIDATION SUCCESS' or 'VALIDATION FAILED'.
-    """
-    print(f"Inventory Validator Received request: {request}")
-    inventoryValidatorQuery = f"""
-    Validate the inventory availability for the following request: 
-    {request}
-    
-    to be fulfilled on {as_of_date}.
-    """
-
-    inventoryAgentResponse = inventoryValidatorAgent.run(inventoryValidatorQuery)
-    print(f"Inventory Validator Agent Response: {inventoryAgentResponse}")
-    return inventoryAgentResponse
-
-
-@tool
-def interactWithQuotingSpecialist(initial_order : str) -> str:
-    """
-    Delegate quote generation to the quoting specialist agent.
-
-    Args:
-        initial_order: The full initial order text received from customer
-
-    Returns:
-        Quote message with pricing details
-    """
-    validationReport = orderFactoryState.iventoryValidationReports[-1]
-
-    orderSpecification = {"order_items" : []}
-
-    for ir in validationReport.inventory_item_reports:
-        if isinstance(ir, InventoryValidationReport):
-            orderSpecification["order_items"].append({
-                "item_name": ir.item_name,
-                "requested_quantity": ir.requested_quantity,
-                "unit_price": ir.unit_price
-            })
-
-    quotingSpecialistQuery= f"""
-                            Generating quotation for the following customer order: 
-                            {initial_order}.
-                            
-                            Utilize the following the aggregated inventory report to calculate order quotation:  
-                            {orderSpecification}                            
-                            """
-
-    return quotingSpecialistAgent.run(quotingSpecialistQuery)
-
-@tool
-def delegateToOrderProcessor(quote_details: str) -> str:
-    """
-    Delegate order recording to the order processor agent.
-
-    Args:
-        quote_details: The full quote details including items, quantities, prices, and date
-
-    Returns:
-        Confirmation message starting with 'SALE CONFIRMED'
-    """
-    inventoryValidationReport = orderFactoryState.iventoryValidationReports[-1]
-    orderProcessorQuery = f"""
-                           Record the order based the following Aggredated Inventory Report: 
-                           {inventoryValidationReport}  
-    
-                           """
-
-
-    return orderProcessorAgent.run(orderProcessorQuery)
-
-
-# Now create  the general manager with the delegation tools
-generalManagerAgent = smol.ToolCallingAgent(
+general_manager = Agent(  # Correct class for orchestrator
     name="general_manager",
-    description=(
-        "You are the General Manager (Orchestrator) for handling user order inquiries. "
-        "You execute a fixed sequential workflow. "
+    system_prompt=(  # Correct argument for Agent
+        "You are the General Manager (Orchestrator). You execute a fixed sequential workflow. "
         "You MUST use the 'as_of_date' from the user's request. "
 
         "**Your primary job is to follow this logic:** "
 
-        "**1. Step 1: Validate the availability of the inventory to fulfill the order with the inventory validator agent.** "
-        "   - Use `delegateToInventoryValidator` by passing the entire original request. "
+        "**1. Triage Request:** "
+        "   - **Simple Inventory Question?** (e.g., 'Do you have A4 paper?'): "
+        "       - Identify the item name (query term). "
+        "       - Use your own `validateInventoryItemTool` with the query term, `requested_quantity=1`, and the date. It returns a `ValidationResult` model. "  # Use the main tool
+        "       - If it's a `ValidationSuccess`, parse the stock level from `delivery_note` or `restock_note`. If `ValidationFailure` due to stock, parse from `reason`. Report the stock level clearly. Job done. "
+        "   - **Full Inventory Question?** (e.g., 'What do you have in stock?'):"
+        "       - Use your own `tool_get_full_inventory`. It returns an `InventoryStockReport` model."
+        "       - Present the stock levels to the user. Job done."
+        "   - **Report Request?** (e.g., 'Generate report...'): "
+        "       - Use your own `tool_generate_financial_report`. It returns a `FinancialReport` model. "
+        "       - Present this to the user. Job done. "
+        "   - **Order or Quote Request?** (e.g., 'I need...', 'Quote for...'): "
+        "       - **This triggers the 3-step sequential workflow.** Proceed to Step 2. "
 
-        "**2. Analyze Inventory Validator Agent Response** "
-        "   - **If inventory validation fails, job done** "
-        "   - **If  inventory succeeds, You MUST proceed to Step 3. "
+        "**2. Step 1: Validate (Delegate to `inventoryValidatorAgent`)** "
+        "   - Pass the *entire user request* (including customer request text, job, event, and date) to the `inventoryValidatorAgent`. "
 
-        "**3. Step 2: Compile quotation for entire order (Delegate to Quoting Specialist Agent)** "
-        "   - Use `interactWithQuotingSpecialist` by passing the entire original request. "
-        ""
-       
-        "**4. Analyze Quote Response** "
-        "   - Receive the 'QUOTE READY' response from the quoter. "
-        "   - **DO NOT** ask the user for confirmation. The sale is automatic. Proceed to Step 6. "
+        "**3. Analyze Validation Response** "
+        "   - The validator will return a string representing an `AggregatedInventoryValidationReport`. "
+        "   - **If the string contains 'VALIDATION_FAILED':** "
+        "       - Relay this failure message to the user (e.g., 'I cannot process this order: [reason]'). Job done. "
+        "   - **If the string contains 'VALIDATION_SUCCESS':** "
+        "       - The order is valid. You MUST proceed to Step 4. "
 
-        "**5. : Record (Delegate to order_processor)** "
-        "   - Use `delegateToOrderProcessor` with the quote details. "
-        "   - This request MUST include the exact item names from inventory report, quantities, prices, and `as_of_date` from the quote. "
+        "**4. Step 2: Quote (Delegate to `quoting_specialist`)** "
+        "   - Pass the *full, unmodified string* (containing all the validation details) from the validator to the `quoting_specialist`. "
+        "   (e.g., 'Create quote using this validation report: [Full AggregatedInventoryValidationReport String]'). "
+
+        "**5. Analyze Quote Response** "
+        "   - **If response starts with 'QUOTE FAILED':** "
+        "       - Relay this failure message to the user. Job done. "
+        "   - **If response starts with 'QUOTE READY':** "
+        "       - The quote is ready. **DO NOT** ask for confirmation. The sale is automatic. Proceed to Step 6. "
+
+        "**6. Step 3: Record (Delegate to `order_processor`)** "
+        "   - Parse the 'QUOTE READY' response to extract the itemized list (item names, quantities, individual prices/unit prices), and the `as_of_date`. "
+        "   - Formulate a new request for the `order_processor`. "
+        "   - This request MUST include the itemized list (name, quantity, unit_price), and `as_of_date`. "
+        "     (e.g., 'Record this confirmed sale for {as_of_date}: Item: A4 paper, Qty: 500, UnitPrice: 0.05; Item: Envelopes, Qty: 100, UnitPrice: 0.05'). "
 
         "**7. Final Confirmation** "
-        "   - Receive the 'SALE CONFIRMED' message from the order processor. "
-        "   - Relay this confirmation to the user, combining it with the quote details. "
+        "   - Receive the 'SALE CONFIRMED' message from the `order_processor`. "
+        "   - Relay this confirmation to the user, combining it with the full quote details from the 'QUOTE READY' message. "
+        "     (e.g., 'Your order is confirmed! [Full 'QUOTE READY' message from quoter] [SALE CONFIRMED message from processor]'). "
 
         "**Rules:** "
         "-   Do NOT reveal internal agent names. "
         "-   Just provide the final, synthesized answer or rejection."
     ),
     tools=[
-        toolGenerateFinancialReport,
-        toolGetFullInventory,
-        delegateToInventoryValidator,
-        interactWithQuotingSpecialist,
-        delegateToOrderProcessor,
+        tool_generate_financial_report,
+        tool_get_full_inventory,
+        validateInventoryItemTool,  # Can use its own tool for simple questions
+    ],
+    specialty_agents=[  # Correct argument for Agent
+        inventoryValidatorAgent,
+        quoting_specialist,
+        order_processor,
     ],
     model=model
 )
@@ -1136,15 +1066,19 @@ def call_your_multi_agent_system(request: str) -> str:
     print(f"--- AGENT SYSTEM INPUT --- \n{request}\n")
     try:
         # Use smol.act() for a direct request-response with the orchestrator
-        response = generalManagerAgent.run(request)
+        response = smol.act(general_manager, request)
         print(f"--- AGENT SYSTEM RESPONSE --- \n{response}\n")
         # Sanitize response to remove sensitive internal info, if any
-        if "Error:" in response or "smol.Agent" in response:
+        if "Error:" in response or "smol.Agent" in response or "Traceback" in response:
+            # Log the actual error internally if possible
+            print(f"INTERNAL ERROR DETECTED in agent response: {response}")
             return "I apologize, but I encountered an internal error trying to process your request."
         return response
     except Exception as e:
         print(f"--- AGENT SYSTEM ERROR --- \n{e}\n")
-        raise e
+        # Capture the traceback for debugging
+        import traceback
+        traceback.print_exc()
         return f"An error occurred while processing your request: {e}"
 
 
@@ -1156,7 +1090,7 @@ def run_test_scenarios():
     init_database(db_engine, seed=137)
 
     try:
-        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")#.iloc[:1,:]
+        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         # Ensure correct date parsing
         quote_requests_sample["request_date"] = pd.to_datetime(
             quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
@@ -1169,7 +1103,10 @@ def run_test_scenarios():
 
     # Get initial state
     initial_date = quote_requests_sample["request_date"].min().strftime("%Y-%m-%d")
-    report = generate_financial_report(initial_date)
+    # Generate initial report using the tool to ensure consistency
+    initial_report_model = tool_generate_financial_report(initial_date)
+    print(
+        f"Initial State ({initial_date}): Cash=${initial_report_model.cash_balance:.2f}, Inv=${initial_report_model.inventory_value:.2f}")
 
     ############
     ############
@@ -1184,13 +1121,14 @@ def run_test_scenarios():
     for idx, row in quote_requests_sample.iterrows():
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
-        print(f"\n=== Request ===")
+        print(f"\n=== Request {row['id']} ===")
         print(f"Context: {row['job']} organizing {row['event']}")
         print(f"Request Date: {request_date}")
 
-        pre_report = generate_financial_report(request_date)
-        current_cash = pre_report["cash_balance"]
-        current_inventory = pre_report["inventory_value"]
+        # Use the tool for reporting pre-request state
+        pre_report_model = tool_generate_financial_report(request_date)
+        current_cash = pre_report_model.cash_balance
+        current_inventory = pre_report_model.inventory_value
         print(f"Cash Balance (pre-request): ${current_cash:.2f}")
         print(f"Inventory Value (pre-request): ${current_inventory:.2f}")
 
@@ -1211,10 +1149,10 @@ def run_test_scenarios():
 
         response = call_your_multi_agent_system(request_with_date)
 
-        # Update state *after* processing the request
-        post_report = generate_financial_report(request_date)
-        current_cash = post_report["cash_balance"]
-        current_inventory = post_report["inventory_value"]
+        # Update state *after* processing the request using the tool
+        post_report_model = tool_generate_financial_report(request_date)
+        current_cash = post_report_model.cash_balance
+        current_inventory = post_report_model.inventory_value
 
         print(f"Response: {response}")
         print(f"Updated Cash (post-request): ${current_cash:.2f}")
@@ -1222,7 +1160,7 @@ def run_test_scenarios():
 
         results.append(
             {
-                #"request_id": row['id'],  # Use the original ID from the CSV
+                "request_id": row['id'],  # Use the original ID from the CSV
                 "request_date": request_date,
                 "cash_balance": current_cash,
                 "inventory_value": current_inventory,
@@ -1234,12 +1172,14 @@ def run_test_scenarios():
 
     # Final report
     final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
-    final_local_report_data = generate_financial_report(final_date)
+    final_local_report_model = tool_generate_financial_report(final_date)
     print("\n===== FINAL FINANCIAL REPORT =====")
-    print(f"Final Cash: ${final_local_report_data.get('cash_balance', 0):.2f}")
-    print(f"Final Inventory: ${final_local_report_data.get('inventory_value', 0):.2f}")
+    print(f"Final Cash: ${final_local_report_model.cash_balance:.2f}")
+    print(f"Final Inventory: ${final_local_report_model.inventory_value:.2f}")
     print("\nTop 5 Selling Products:")
-    print(pd.DataFrame(final_local_report_data.get('top_selling_products', [])).to_string())
+    # Convert Pydantic model list to DataFrame for printing
+    top_products_df = pd.DataFrame([vars(p) for p in final_local_report_model.top_selling_products])
+    print(top_products_df.to_string())
 
     # Save results
     pd.DataFrame(results).to_csv("test_results.csv", index=False)
@@ -1247,8 +1187,18 @@ def run_test_scenarios():
 
 
 if __name__ == "__main__":
+    # Ensure precomputation runs if enabled and hasn't already
+    if SEMANTIC_SEARCH_ENABLED and not item_embedding_map and openai_client:
+        print("Embeddings map is empty. Running precomputation...")
+        item_embedding_map = precompute_openai_embeddings(openai_client, paper_supplies)
+        if not item_embedding_map:
+            print("FATAL: Precomputation failed. Semantic search will be disabled.")
+            SEMANTIC_SEARCH_ENABLED = False  # Ensure it's disabled if failed
+
     try:
         results = run_test_scenarios()
     except Exception as e:
-        #print(f"An error occurred during test run: {e}")
-        raise e
+        print(f"An error occurred during test run: {e}")
+        import traceback
+
+        traceback.print_exc()

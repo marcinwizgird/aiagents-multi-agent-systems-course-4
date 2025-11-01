@@ -1,5 +1,3 @@
-import copy
-
 import pandas as pd
 import numpy as np
 import os
@@ -14,7 +12,6 @@ from sqlalchemy.sql import text
 from datetime import datetime, timedelta
 from typing import Dict, List, Union, Optional
 from sqlalchemy import create_engine, Engine
-from dataclasses import dataclass, field, asdict
 
 SEMANTIC_SEARCH_ENABLED = True
 
@@ -525,17 +522,11 @@ class InventoryValidationFailure(BaseModel):
 InventoryValidationResult = Union[InventoryValidationReport, InventoryValidationFailure]
 
 class AggregatedInventoryValidationReport(BaseModel):
-    inventory_item_reports: List[Union[InventoryValidationReport, InventoryValidationFailure]]
+    inventory_item_reports: List[InventoryValidationReport]
 
 class ItemRequest(BaseModel):
     item_query_term: str = Field(..., description="The user's description of the item (e.g., 'copy paper')")
     requested_quantity: int = Field(..., description="The number of units requested")
-
-@dataclass
-class OrderFactoryState:
-    iventoryValidationReports : List[AggregatedInventoryValidationReport] = None
-
-orderFactoryState = OrderFactoryState(iventoryValidationReports=[])
 
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
@@ -566,14 +557,15 @@ ITEM_ALIAS_MAP = {
 @tool
 def toolSearchQuoteHistory(search_terms: List[str]) -> QuoteHistoryResponse:
     """
-    Searches historical orders based on the search terms provided.
+    Searches historical quotes for similar requests to inform new pricing - especially granting discounts
+    based on the order value and history of granting similar order in the past.
     Search is performed based on the search terms applied on the following quote fields:
             1.quote_explanation.
             2.quote_response.
 
     Args:
         search_terms (List[str]): A list of keywords extracted from the customer's request to
-                                  (e.g., item names, event types, requested quantities, etc.).
+                                  (e.g., item names, event type).
 
     Returns:
         QuoteHistoryResponse: A Pydantic model containing a list of matches and a count.
@@ -712,37 +704,6 @@ def toolFindClosestItem(query_term: str) -> str:
         return fallback_search(query_term)
 
 # --- NEW DETERMINISTIC "SUPER-TOOL" FOR VALIDATION ---
-
-@tool
-def toolApplyDiscount(discount_percent: float) -> AggregatedInventoryValidationReport:
-    """
-    Applies a percentage discount to the unit_price of all successful items
-    in the latest inventory validation report stored in the system's memory.
-
-    Args:
-        discount_percent (float): The discount percentage to apply (e.g., 5 for 5%, 10.5 for 10.5%).
-
-    Returns:
-        AggregatedInventoryValidationReport: A new report model with the
-                                             discounted unit prices.
-    """
-    if not orderFactoryState.iventoryValidationReports:
-        # This case should not happen in the normal flow
-        raise ValueError("No inventory report found in state.")
-
-    # Create a deep copy to avoid mutating the original report in state
-    original_report = orderFactoryState.iventoryValidationReports[-1]
-    discounted_report = copy.deepcopy(original_report)
-
-    discount_multiplier = 1.0 - (discount_percent / 100.0)
-
-    for item_report in discounted_report.inventory_item_reports:
-        if isinstance(item_report, InventoryValidationReport):
-            # Apply discount to the unit price
-            item_report.unit_price = item_report.unit_price * discount_multiplier
-
-    return discounted_report
-
 @tool
 def validateInventoryItemTool(item_query_term: str, requested_quantity: int, as_of_date: str) -> InventoryValidationResult:
     """
@@ -861,21 +822,18 @@ def toolGenerateInventoryReport(
     all_reports = []
     print(f"--- Generating Inventory Report for {len(item_requests)} items on {as_of_date} ---")
     for item_req in item_requests:
-        print(f"Validating item: {item_req['item_query_term']} (Qty: {item_req['requested_quantity']}")
+        print(f"Validating item: {item_req.item_query_term} (Qty: {item_req.requested_quantity})")
         # Call the original validation tool for each item
         result = validateInventoryItemTool(
-            item_query_term=item_req['item_query_term'],
-            requested_quantity=item_req['requested_quantity'],
+            item_query_term=item_req.item_query_term,
+            requested_quantity=item_req.requested_quantity,
             as_of_date=as_of_date
         )
         all_reports.append(result)
 
     print(f"--- Aggregated Report Generation Complete. {len(all_reports)} results. ---")
-
-    aggregatedInvetoryReport = AggregatedInventoryValidationReport(inventory_item_reports=all_reports)
-    orderFactoryState.iventoryValidationReports.append(aggregatedInvetoryReport)
-
     return AggregatedInventoryValidationReport(inventory_item_reports=all_reports)
+
 
 # --- Tools for Orchestrator Agent ---
 @tool
@@ -919,58 +877,60 @@ def toolGetFullInventory(as_of_date: str) -> InventoryStockReport:
 
 # --- Worker Agents ---
 
-# Agent 2: (Handles Step 1 - Inventory Validation)
-inventoryValidatorAgent = smol.ToolCallingAgent(  # Renamed from inventory_validator
+inventoryValidatorAgent = smol.ToolCallingAgent(
     name="inventory_validator",
     description=(
-        "You are an expert inventory validator. Your job is to generate an aggregated inventory report. "
-        "You will receive a multi-item order request from the user. You MUST use the 'as_of_date'. "
+        "You are an expert inventory validator. Your job is to create a Inventory Validation Report "
+        "by processing each item requested by the user. "
+        "You will receive a multi-item order request. You must use the 'as_of_date'. "
 
         "**Your Workflow:** "
-        "1.  **Parse Request:** Identify all item descriptions (query terms) and their requested quantities from the user's request (e.g., '500 sheets of copy paper', '100 envelopes'). "
-        "2.  **Create ItemRequest List:** Format these into a list of `ItemRequest` objects. For example: "
-        "    `[ItemRequest(item_query_term='copy paper', requested_quantity=500), ItemRequest(item_query_term='envelopes', requested_quantity=100)]` "
-        "3.  **Call Report Tool:** Call the `toolGenerateInventoryReport` tool *once*. Pass the list of `ItemRequest` objects and the `as_of_date`. "
-        "4.  *Return Report:** The tool will return an `AggregatedInventoryValidationReport` model. Return ONLY THIS REPORT. "
+        "1.  **Parse Request:** Identify all item descriptions (query terms) the user asked for and their quantities (e.g., '500 sheets of copy paper', '100 envelopes'). "
+        "2.  **Call Processing Tool (Loop):** For *each item query term* and its quantity, you MUST call the `validateInventoryItemTool` tool. Pass it the `item_query_term`, `requested_quantity`, and `as_of_date`. "
+        "    - This single tool handles finding the exact item, validating stock/suppliers, and triggering restocks. It returns a `InventoryValidationReport` or `InventoryValidationFailure` model. "
+        "3.  **Collect Results:** Gather all the models returned by the tool. "
 
+        "**Final Report in JSON Format** "
+        """
+        {
+           item_validation_reports: [{"exact_item_name", "delivery_note", "stock_note", "unit_price", "requested_quantity"}, {...}, {....}],] 
+        } 
+        """
+        "Response MUST USE only exact item names returned by the tool. ."
     ),
     tools=[
-        toolGenerateInventoryReport,  # <-- NEW, single tool
+        validateInventoryItemTool, # Only tool needed now
     ],
-    model=model
+    model=model,
+    #response_model = AggregatedInventoryValidationReport
 )
 
 # Agent 2: (Handles Step 2 - Quoting)
 quotingSpecialistAgent = smol.ToolCallingAgent(
     name="quoting_specialist",
-    description= """ 
-        You are an expert Quoting Specialist. Your job is to:"
-        1. Search for similar orders to the original request to determine discount based on order history between 0 and 5%. 
-           You must do that with the tool 'toolSearchQuoteHistory'. 
-        2. Determine additional discount based on order value.
-        3. Apply cummulative discount to the order with tool 'toolApplyDiscount'. 
-        4. Quote the order with tool 'toolCreateQuote'. 
-        
-        You will receive an `AggregatedInventoryValidationReport` string from the General Manager. 
-        
+    description=(  # Correct argument for ToolCallingAgent
+        "You are an expert quoting specialist. Your job is to *only* do math and formatting. "
+        "You will receive a 'VALIDATION SUCCESS' report from the General Manager. "
+        "This report is a string containing one or more `ValidationSuccess` models. "
+        "You MUST call ONLY tools available to you. "
+
         "**Your Workflow:** "
-        1.  **Check Oder Feasibility: ** If NOT respond with 'QUOTE FAILED:' followed by the reasons"
-        2.  **Determine Discount based on similar Order History***: Value based on Aggregate Inventory Report**"
-             - Define Search Criteria:** Create a list of useful search criterias based on the original order content and inventory report."
-             - call tool 'toolSearchQuoteHistory' with the list of search criteria. 
-        3. Determine Discount:** Based on the initial order value:
-            - If `initial_total < 100`: `discount_percent = 0` "
-            - If `100 <= initial_total < 500`: `discount_percent = 5` "
-            - If `500 <= initial_total < 1000`: `discount_percent = 10` "
-            - If `initial_total >= 1000`: `discount_percent = 15` "
-            - (You may review the `QuoteHistoryResponse` for context, but stick to the price-based discount tiers.) "
-        4. **Apply Total Discount from point 3 and 4** Call the `toolApplyDiscount(discount_percent=...)` tool ONLY ONCE for entire order."
-        5. **Summarize Quote details for customer order**
-    """
-    ,
+        "1.  **Parse Report:** Parse the string to find all `ValidationSuccess` models. "
+        "    From each model, extract `item_name`, `requested_quantity`, `unit_price`, `delivery_note`, and `restock_note`. "
+        "2.  **Calculate Price:** Calculate `Total = sum(requested_quantity * unit_price)` for all items. "
+        "3.  **Search History:** Call `tool_search_quote_history`. This returns a `QuoteHistoryResponse` model. "
+        "4.  **Apply Discounts:** Apply discounts similar to those granted in the past for ismilar orders. Additionally, Apply 5% discount if Total > $200. Apply 10% discount if Total > $500. Apply 15% discount if Total > $1000. ** "        
+        "5.  **Return the final quote in the following Format Quote:** Respond with 'QUOTE READY:'. Include the itemized list, the final total, any discount, and all 'notes' from the validation models. "
+        "    Example: 'QUOTE READY: "
+        "    - A4 paper (500 units): $25.00 "
+        "    - Envelopes (100 units): $5.00 "
+        "    Total: $30.00 (No discount applied). "
+        "    Notes: Restock order for A4 paper placed. Envelopes are in stock. "
+        "    History: Found 2 similar quotes. "
+        "    '"
+    ),
     tools=[
-        toolSearchQuoteHistory,
-        toolApplyDiscount
+        toolSearchQuoteHistory,  # Only tool needed
     ],
     model=model
 )
@@ -1019,36 +979,22 @@ def delegateToInventoryValidator(request: str,  as_of_date : str) -> AggregatedI
 
 
 @tool
-def interactWithQuotingSpecialist(initial_order : str) -> str:
+def interactWithQuotingSpecialist(validation_result : str, exact_inventory_item_name : str) -> str:
     """
     Delegate quote generation to the quoting specialist agent.
 
     Args:
-        initial_order: The full initial order text received from customer
+        validation_result: The full inventory validation report from the inventory validator for the particular inventory item
+        exact_inventory_item_name: The exact name of the inventory item that was validated
 
     Returns:
-        Quote message with pricing details
+        Quote message starting with 'QUOTE READY'
     """
-    validationReport = orderFactoryState.iventoryValidationReports[-1]
-
-    orderSpecification = {"order_items" : []}
-
-    for ir in validationReport.inventory_item_reports:
-        if isinstance(ir, InventoryValidationReport):
-            orderSpecification["order_items"].append({
-                "item_name": ir.item_name,
-                "requested_quantity": ir.requested_quantity,
-                "unit_price": ir.unit_price
-            })
-
     quotingSpecialistQuery= f"""
-                            Generating quotation for the following customer order: 
-                            {initial_order}.
-                            
-                            Utilize the following the aggregated inventory report to calculate order quotation:  
-                            {orderSpecification}                            
+                            Generating quotation for {exact_inventory_item_name}.
+                            Please utilize the inventory validation result for quotation generation: 
+                            {validation_result}                            
                             """
-
     return quotingSpecialistAgent.run(quotingSpecialistQuery)
 
 @tool
@@ -1062,15 +1008,7 @@ def delegateToOrderProcessor(quote_details: str) -> str:
     Returns:
         Confirmation message starting with 'SALE CONFIRMED'
     """
-    inventoryValidationReport = orderFactoryState.iventoryValidationReports[-1]
-    orderProcessorQuery = f"""
-                           Record the order based the following Aggredated Inventory Report: 
-                           {inventoryValidationReport}  
-    
-                           """
-
-
-    return orderProcessorAgent.run(orderProcessorQuery)
+    return orderProcessorAgent.run(quote_details)
 
 
 # Now create  the general manager with the delegation tools
@@ -1086,21 +1024,24 @@ generalManagerAgent = smol.ToolCallingAgent(
         "**1. Step 1: Validate the availability of the inventory to fulfill the order with the inventory validator agent.** "
         "   - Use `delegateToInventoryValidator` by passing the entire original request. "
 
-        "**2. Analyze Inventory Validator Agent Response** "
+        "**3. Analyze Inventory Validator Agent Response** "
         "   - **If inventory validation fails, job done** "
-        "   - **If  inventory succeeds, You MUST proceed to Step 3. "
+        "   - **If  inventory succeeds, You MUST proceed to Step 4.  "
 
-        "**3. Step 2: Compile quotation for entire order (Delegate to Quoting Specialist Agent)** "
-        "   - Use `interactWithQuotingSpecialist` by passing the entire original request. "
+        "**4. Step 2: Compile quotation for inventory item (Delegate to Quoting Specialist Agent)** "
+        "   - Use `interactWithQuotingSpecialist` with two mandatory arguments: validation_result and exact_inventory_item_name."
+        "   - Provide entire response from Inventory Validation Agent response as validation_result"
+        "   - Provide exact inventory item names as exact_inventory_item_name returned by Inventory Validator Agent"
         ""
        
-        "**4. Analyze Quote Response** "
+
+        "**5. Analyze Quote Response** "
         "   - Receive the 'QUOTE READY' response from the quoter. "
         "   - **DO NOT** ask the user for confirmation. The sale is automatic. Proceed to Step 6. "
 
-        "**5. : Record (Delegate to order_processor)** "
-        "   - Use `delegateToOrderProcessor` with the quote details. "
-        "   - This request MUST include the exact item names from inventory report, quantities, prices, and `as_of_date` from the quote. "
+        "**6. Step 3: Record (Delegate to order_processor)** "
+        "   - Use `delegate_to_order_processor` with the quote details. "
+        "   - This request MUST include the itemized list, quantities, prices, and `as_of_date` from the quote. "
 
         "**7. Final Confirmation** "
         "   - Receive the 'SALE CONFIRMED' message from the order processor. "
@@ -1156,7 +1097,7 @@ def run_test_scenarios():
     init_database(db_engine, seed=137)
 
     try:
-        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")#.iloc[:1,:]
+        quote_requests_sample = pd.read_csv("quote_requests_sample.csv").iloc[:1,:]
         # Ensure correct date parsing
         quote_requests_sample["request_date"] = pd.to_datetime(
             quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"

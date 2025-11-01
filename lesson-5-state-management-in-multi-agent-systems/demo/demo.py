@@ -156,7 +156,7 @@ class OrchestratorAgent(ToolCallingAgent):
         If the user expresses interest in a fruit, use add_fruit_preference to save it.
         If the user wants to know their preferences, use get_user_preferences.
         Remember to save the user's state with save_user_state before ending the conversation.
-        
+          
         Respond in a friendly, informative way in both English and a bit of Spanish.
         """
         

@@ -1,0 +1,65 @@
+request_date,cash_balance,inventory_value,response
+2025-04-01,45094.7,4905.299999999999,"The order for paper supplies has been successfully recorded. The total cost is $35.00, and delivery can be fulfilled by April 15, 2025."
+2025-04-03,45094.7,4905.299999999999,"The requested items (colorful poster paper, streamers, and balloons) are not available in the inventory as of April 3, 2025. Therefore, a quotation cannot be generated."
+2025-04-04,45119.1,4880.899999999999,"The order has been successfully placed for 72 sheets of A4 paper and 272 sheets of A3 paper, with a total cost of $17.20. Delivery is scheduled for April 15, 2025."
+2025-04-05,45109.1,4890.899999999999,"Unable to fulfill the order due to the unavailability of high-quality, recycled cardstock and the current out-of-stock status of A4 size printer paper. A restock for A4 paper is expected by April 9, 2025, but cardstock is not available."
+2025-04-05,45109.1,4890.899999999999,"The order for 500 sheets of 8.5""x11"" colored paper and 300 sheets of cardstock in various colors can be fulfilled. However, the order for 200 rolls of decorative washi tape cannot be completed as it is not available in the inventory."
+2025-04-06,45109.1,4890.899999999999,The order cannot be fulfilled because colorful construction paper and white printer paper are not available in the inventory.
+2025-04-07,45109.1,4890.899999999999,"The order can be partially fulfilled. Here are the details:
+
+- **Glossy A4 Paper**: 500 sheets at $0.20 each = $100.00
+- **Matte A3 Paper**: Not available
+- **Poster Boards (24"" x 36"")**: 300 boards at $1.00 each = $300.00
+- **Heavyweight Cardstock**: Not available
+
+Total: $400.00 (excluding prices for unavailable items). 
+
+Please advise if you would like to proceed with the available items or make any adjustments."
+2025-04-07,45089.1,4910.899999999999,"The order has been successfully recorded. The colored paper will be delivered on April 14, 2025, along with the recycled paper. The A4 glossy and matte papers are out of stock and will be available for delivery by April 11, 2025."
+2025-04-07,45089.1,4910.899999999999,The order cannot be fulfilled as requested due to insufficient stock of A4 white printer paper (only 184 sheets available) and the unavailability of 100% recycled kraft paper envelopes. A substitution or revision of the order is necessary.
+2025-04-08,45174.1,4825.9,"Order successfully recorded. 200 sheets of cardstock will be delivered, and 500 sheets of A4 printing paper are noted as out of stock but expected to arrive shortly."
+2025-04-08,45144.1,4855.9,"The order cannot be fully fulfilled as requested. 
+
+- **Colorful Cardstock**: Requested 200 sheets, but only 95 are in stock. A restock order has been placed, and the supplier will deliver by April 12, 2025.
+- **Standard Printer Paper**: Not found in inventory.
+- **Paper Napkins**: Not found in inventory."
+2025-04-08,45389.1,4610.9,"Order recorded successfully for 500 sheets of high-quality glossy paper and 300 sheets of sturdy cardstock (note: cardstock out of stock, delivery by April 12, 2025). Total cost: $145.00."
+2025-04-08,45289.1,4710.9,"The order cannot be fulfilled on the specified date of April 8, 2025, as both A3 glossy paper and A4 matte paper are out of stock, with delivery expected by April 12, 2025."
+2025-04-09,45249.1,4750.9,"The order has been successfully recorded for A4 paper (available 284 sheets) and cardstock (available 195 sheets). However, the poster paper is not available and A4 paper delivery is expected by April 16, 2025, and cardstock delivery by April 13, 2025."
+2025-04-12,45314.1,4685.9,"The order cannot be fully fulfilled at this time due to the following issues:
+
+1. **A4 white paper**:
+   - Requested: 10,000 sheets 
+   - Status: Out of stock 
+   - Current Stock: -1,216 sheets 
+   - Delivery Note: Supplier will deliver by 2025-04-19.
+
+2. **A3 colored paper**:
+   - Requested: 5,000 sheets 
+   - Status: Available 
+   - Current Stock: 688 sheets 
+   - Delivery Note: Supplier will deliver by 2025-04-19.
+
+3. **Cardboard for signage**:
+   - Requested: 500 reams 
+   - Status: Validation failed 
+   - Reason: Could not find a close match for 'reams of cardboard'. 
+
+Please let me know if you would like to adjust your order."
+2025-04-13,45334.1,4665.9,"The order for 500 sheets of A4 printer paper is available, but it is out of stock and will be delivered by April 17, 2025. The colorful construction paper and poster board are unavailable and cannot be ordered."
+2025-04-14,45684.1,4315.9,"The requested supplies cannot be fully fulfilled as the inventory validation failed for the following items:
+1. 1000 sheets of A4 white printer paper: Not found in inventory.
+2. 500 sheets of A3 colored paper (assorted colors): Not found in inventory.
+3. 2000 table napkins (white): Not found in inventory.
+4. 1000 paper cups (biodegradable): Not found in inventory.
+
+Only 500 paper plates (biodegradable) are available (748 in stock). Quotations cannot be generated due to lack of available items."
+2025-04-14,45664.100000000006,4335.9,"The order cannot be fulfilled as all requested paper supplies are out of stock, and there are no valid items available for the order."
+2025-04-15,45624.100000000006,4375.9,"The order for the requested paper supplies cannot be fully fulfilled by the requested date of April 15, 2025. The details are as follows:
+
+1. **A4 glossy paper:** Out of stock, delivery expected by April 22, 2025.
+2. **A3 matte paper:** Not found in inventory.
+3. **Cardstock:** Out of stock, delivery expected by April 19, 2025.
+
+As a result, the total order cost is $250, excluding the unavailable items."
+2025-04-17,45634.100000000006,4365.9,"Unfortunately, we cannot fulfill your order for 5,000 flyers, 2,000 posters, and 10,000 tickets as these items are currently not available in inventory."
